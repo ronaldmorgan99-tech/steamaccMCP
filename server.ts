@@ -1,0 +1,179 @@
+import express from 'express';
+import { createServer as createViteServer } from 'vite';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { z } from 'zod';
+import axios from 'axios';
+import cors from 'cors';
+import * as dotenv from 'dotenv';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(cors());
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
+
+  // --- OAuth Logic (Mocked to bypass Grok/Claude requirements) ---
+  app.get('/oauth/authorize', (req, res) => {
+    const { redirect_uri, state } = req.query;
+    if (!redirect_uri) return res.status(400).json({ error: 'invalid_request', error_description: 'Missing redirect_uri' });
+    
+    try {
+      const url = new URL(redirect_uri as string);
+      url.searchParams.append('code', 'mock_auth_code_123');
+      if (state) {
+        url.searchParams.append('state', state as string);
+      }
+      res.redirect(url.toString());
+    } catch (e) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri format' });
+    }
+  });
+
+  app.post('/oauth/token', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    // Return a mock token
+    res.json({
+      access_token: 'mock_access_token_456',
+      token_type: 'Bearer',
+      expires_in: 31536000,
+      refresh_token: 'mock_refresh_token_789',
+      scope: 'read'
+    });
+  });
+
+  // --- Steam Logic (Public Profile Mode) ---
+  class SteamClient {
+    private steamId: string;
+    private PUBLIC_BASE_URL = "https://steamcommunity.com/profiles";
+
+    constructor(steamId: string) {
+      this.steamId = steamId;
+    }
+
+    async getPlayerSummary() {
+      const url = `${this.PUBLIC_BASE_URL}/${this.steamId}/?xml=1`;
+      try {
+        const response = await axios.get(url);
+        const xml = response.data;
+        const steamID = xml.match(/<steamID><!\[CDATA\[(.*?)\]\]><\/steamID>/)?.[1] || xml.match(/<steamID>(.*?)<\/steamID>/)?.[1];
+        const onlineState = xml.match(/<onlineState>(.*?)<\/onlineState>/)?.[1];
+        const avatarFull = xml.match(/<avatarFull><!\[CDATA\[(.*?)\]\]><\/avatarFull>/)?.[1] || xml.match(/<avatarFull>(.*?)<\/avatarFull>/)?.[1];
+        const privacyState = xml.match(/<privacyState>(.*?)<\/privacyState>/)?.[1];
+        
+        return {
+          personaname: steamID,
+          personastate: onlineState,
+          avatar: avatarFull,
+          is_private: privacyState !== 'public'
+        };
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async getOwnedGames() {
+      const url = `${this.PUBLIC_BASE_URL}/${this.steamId}/games/?tab=all&xml=1`;
+      try {
+        const response = await axios.get(url);
+        const xml = response.data;
+        const games: any[] = [];
+        const gameMatches = xml.matchAll(/<game>([\s\S]*?)<\/game>/g);
+        
+        for (const match of gameMatches) {
+          const content = match[1];
+          const appid = content.match(/<appID>(.*?)<\/appID>/)?.[1];
+          const name = content.match(/<name><!\[CDATA\[(.*?)\]\]><\/name>/)?.[1] || content.match(/<name>(.*?)<\/name>/)?.[1];
+          const hoursOnRecord = content.match(/<hoursOnRecord>(.*?)<\/hoursOnRecord>/)?.[1];
+          const hoursLast2Weeks = content.match(/<hoursLast2Weeks>(.*?)<\/hoursLast2Weeks>/)?.[1];
+          
+          if (appid && name) {
+            games.push({
+              appid: parseInt(appid),
+              name,
+              playtime_forever: parseFloat((hoursOnRecord || '0').replace(',', '')) * 60,
+              playtime_2weeks: parseFloat((hoursLast2Weeks || '0').replace(',', '')) * 60
+            });
+          }
+        }
+        return games;
+      } catch (e) {
+        return [];
+      }
+    }
+  }
+
+  // --- MCP Server Setup ---
+  const mcpServer = new McpServer({
+    name: "Steam MCP Server",
+    version: "1.0.0",
+  });
+
+  mcpServer.tool("get_player_summary", { steam_id: z.string().optional() }, async ({ steam_id }) => {
+    const id = steam_id || process.env.STEAM_USER_ID;
+    if (!id) return { content: [{ type: "text", text: "No Steam ID provided." }] };
+    const client = new SteamClient(id);
+    const summary = await client.getPlayerSummary();
+    if (!summary) return { content: [{ type: "text", text: "Profile not found." }] };
+    return {
+      content: [{ type: "text", text: `Player: ${summary.personaname}\nStatus: ${summary.personastate}\nPrivate: ${summary.is_private}` }]
+    };
+  });
+
+  mcpServer.tool("get_library", { steam_id: z.string().optional() }, async ({ steam_id }) => {
+    const id = steam_id || process.env.STEAM_USER_ID;
+    if (!id) return { content: [{ type: "text", text: "No Steam ID provided." }] };
+    const client = new SteamClient(id);
+    const games = await client.getOwnedGames();
+    if (games.length === 0) return { content: [{ type: "text", text: "No games found or profile is private." }] };
+    const list = games.slice(0, 20).map(g => `- ${g.name} (${Math.round(g.playtime_forever / 60)}h)`).join('\n');
+    return {
+      content: [{ type: "text", text: `Top Games:\n${list}${games.length > 20 ? '\n... and ' + (games.length - 20) + ' more' : ''}` }]
+    };
+  });
+
+  let transport: SSEServerTransport | null = null;
+  app.get("/mcp/sse", async (req, res) => {
+    transport = new SSEServerTransport("/mcp/messages", res);
+    await mcpServer.connect(transport);
+  });
+
+  app.post("/mcp/messages", async (req, res) => {
+    if (transport) {
+      await transport.handlePostMessage(req, res);
+    } else {
+      res.status(400).send("No active transport");
+    }
+  });
+
+  // --- Vite Middleware ---
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.resolve(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer().catch(console.error);

@@ -1,0 +1,6 @@
+{
+  "name": "Steam MCP Server",
+  "description": "A Model Context Protocol (MCP) server for Steam Web API, providing access to library, achievements, and player stats for LLMs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
