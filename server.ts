@@ -8,6 +8,7 @@ import { z } from 'zod';
 import axios from 'axios';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -17,7 +18,6 @@ const __dirname = path.dirname(__filename);
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
-  const PORT = 3000;
   const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
   app.use(cors());
@@ -44,33 +44,58 @@ async function startServer() {
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
       token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
-      scopes_supported: ['read']
+      scopes_supported: ['read'],
+      code_challenge_methods_supported: ['S256', 'plain']
+    });
+  });
+  app.get('/.well-known/openid-configuration', (req, res) => {
+    const host = req.get('x-forwarded-host') || req.get('host');
+    const proto = req.get('x-forwarded-proto') || req.protocol;
+    const requestBaseUrl = host ? `${proto}://${host}` : APP_URL;
+    const issuer = process.env.APP_URL || requestBaseUrl;
+
+    res.json({
+      issuer,
+      authorization_endpoint: `${issuer}/oauth/authorize`,
+      token_endpoint: `${issuer}/oauth/token`,
+      response_types_supported: ['code', 'token'],
+      grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
+      token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
+      scopes_supported: ['read'],
+      code_challenge_methods_supported: ['S256', 'plain']
     });
   });
 
-  app.get('/.well-known/oauth-authorization-server', (_req, res) => {
-    res.json({
-      issuer: APP_URL,
-      authorization_endpoint: `${APP_URL}/oauth/authorize`,
-      token_endpoint: `${APP_URL}/oauth/token`,
-      response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
-      scopes_supported: ['read']
-    });
-  });
 
   // --- OAuth Logic (Mocked to bypass Grok/Claude requirements) ---
   app.get('/oauth/authorize', (req, res) => {
-    const { redirect_uri, state, response_type } = req.query;
+    const { redirect_uri, state, response_type, client_id, scope } = req.query;
     if (!redirect_uri) return res.status(400).json({ error: 'invalid_request', error_description: 'Missing redirect_uri' });
-    if (response_type && response_type !== 'code') {
-      return res.status(400).json({ error: 'unsupported_response_type', error_description: 'Only response_type=code is supported' });
+    if (response_type && response_type !== 'code' && response_type !== 'token') {
+      return res.status(400).json({ error: 'unsupported_response_type', error_description: 'Only response_type=code or token is supported' });
     }
     
     try {
       const url = new URL(redirect_uri as string);
-      url.searchParams.append('code', 'mock_auth_code_123');
+      if (response_type === 'token') {
+        url.hash = new URLSearchParams({
+          access_token: `mock_access_${crypto.randomUUID().replace(/-/g, '')}`,
+          token_type: 'Bearer',
+          expires_in: '31536000',
+          scope: typeof scope === 'string' ? scope : 'read',
+          ...(state ? { state: String(state) } : {})
+        }).toString();
+        return res.redirect(url.toString());
+      }
+
+      const authCode = `mock_${crypto.randomUUID().replace(/-/g, '')}`;
+      authCodes.set(authCode, {
+        redirectUri: redirect_uri as string,
+        clientId: typeof client_id === 'string' ? client_id : undefined,
+        scope: typeof scope === 'string' ? scope : 'read',
+        expiresAt: Date.now() + 5 * 60 * 1000
+      });
+      url.searchParams.append('code', authCode);
       if (state) {
         url.searchParams.append('state', state as string);
       }
@@ -99,6 +124,8 @@ async function startServer() {
 
     const grantType = req.body?.grant_type;
     const code = req.body?.code;
+    const redirectUri = req.body?.redirect_uri;
+    const clientId = req.body?.client_id;
     if (grantType && grantType !== 'authorization_code' && grantType !== 'refresh_token') {
       return res.status(400).json({
         error: 'unsupported_grant_type',
@@ -111,15 +138,26 @@ async function startServer() {
     if (grantType === 'authorization_code' && !code) {
       return res.status(400).json({ error: 'invalid_request', error_description: 'Missing authorization code' });
     }
-    if (grantType === 'authorization_code' && code !== 'mock_auth_code_123') {
-      return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid or expired authorization code' });
+    if (grantType === 'authorization_code') {
+      const storedCode = authCodes.get(code);
+      if (!storedCode || storedCode.expiresAt < Date.now()) {
+        authCodes.delete(code);
+        return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid or expired authorization code' });
+      }
+      if (redirectUri && redirectUri !== storedCode.redirectUri) {
+        return res.status(400).json({ error: 'invalid_grant', error_description: 'redirect_uri does not match authorization request' });
+      }
+      if (clientId && storedCode.clientId && clientId !== storedCode.clientId) {
+        return res.status(400).json({ error: 'invalid_grant', error_description: 'client_id does not match authorization request' });
+      }
+      authCodes.delete(code);
     }
 
     res.json({
-      access_token: 'mock_access_token_456',
+      access_token: `mock_access_${crypto.randomUUID().replace(/-/g, '')}`,
       token_type: 'Bearer',
       expires_in: 31536000,
-      refresh_token: 'mock_refresh_token_789',
+      refresh_token: `mock_refresh_${crypto.randomUUID().replace(/-/g, '')}`,
       scope: 'read'
     });
   });
@@ -249,3 +287,4 @@ async function startServer() {
 }
 
 startServer().catch(console.error);
+  const authCodes = new Map<string, { redirectUri: string; clientId?: string; scope?: string; expiresAt: number }>();
