@@ -22,10 +22,17 @@ async function startServer() {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
+  app.get('/favicon.ico', (_req, res) => {
+    res.status(204).end();
+  });
+
   // --- OAuth Logic (Mocked to bypass Grok/Claude requirements) ---
   app.get('/oauth/authorize', (req, res) => {
-    const { redirect_uri, state } = req.query;
+    const { redirect_uri, state, response_type } = req.query;
     if (!redirect_uri) return res.status(400).json({ error: 'invalid_request', error_description: 'Missing redirect_uri' });
+    if (response_type && response_type !== 'code') {
+      return res.status(400).json({ error: 'unsupported_response_type', error_description: 'Only response_type=code is supported' });
+    }
     
     try {
       const url = new URL(redirect_uri as string);
@@ -43,6 +50,14 @@ async function startServer() {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Pragma', 'no-cache');
     // Return a mock token
+    const grantType = req.body?.grant_type;
+    if (grantType && grantType !== 'authorization_code' && grantType !== 'refresh_token') {
+      return res.status(400).json({
+        error: 'unsupported_grant_type',
+        error_description: 'Supported grant types are authorization_code and refresh_token'
+      });
+    }
+
     res.json({
       access_token: 'mock_access_token_456',
       token_type: 'Bearer',
@@ -159,7 +174,7 @@ async function startServer() {
   // --- Vite Middleware ---
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

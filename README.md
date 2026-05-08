@@ -1,74 +1,63 @@
-# Steam MCP Server (No-API-Key)
+# Steam MCP Server (TypeScript + React)
 
-A Model Context Protocol (MCP) server that connects to Steam using public profile data. This version **does not require a Steam Web API Key**, prioritizing privacy and ease of setup.
+A Model Context Protocol (MCP) server with a small web status page. It connects to Steam using public profile data and does **not** require a Steam Web API key.
+
+## Why the site may not load
+
+If you followed older instructions (like `python main.py`), the app will not start because this repo now runs on **Node.js/TypeScript** and the entrypoint is `server.ts`.
+
+Use the commands in this README instead.
 
 ## Features
 
-- **get_my_steam_library**: List all owned games and playtime (Public data).
-- **get_recently_played**: See what you've been playing lately.
-- **get_game_details**: Detailed info for any Steam game.
-- **get_player_summary**: Public profile status, bio, and avatar.
-- **search_my_library**: Find games you own by name.
-- **get_playtime_stats**: Overall library statistics (total hours, top games).
+- `get_player_summary`: Public profile status and basic profile details.
+- `get_library`: Owned games and playtime summary (public data).
+- OAuth mock endpoints for tools that require an OAuth flow:
+  - `/oauth/authorize`
+  - `/oauth/token`
+- SSE endpoint for MCP clients:
+  - `/mcp/sse`
 
-## Important: Privacy Settings
+## Prerequisites
 
-For this server to fetch your data, you **MUST** set your Steam profile to public:
-1. Go to your Steam Profile -> **Edit Profile**.
-2. Go to **Privacy Settings**.
-3. Set **My profile** to **Public**.
-4. Set **Game details** to **Public**.
-5. (Optional) Uncheck "Always keep my total playtime private" if you want playtime stats.
+- Node.js 20+
+- npm 10+
 
 ## Setup
 
-### 1. Get your Steam User ID
-
-- **Steam User ID**: You need your **Steam64 ID**. You can find it by putting your profile link into [https://steamid.io](https://steamid.io). It is a 17-digit number starting with `765`.
-
-### 2. Configure Environment
-
-Create a `.env` file in the root directory:
+1. Create a `.env` file in the repo root:
 
 ```env
 STEAM_USER_ID=your_17_digit_steam_id
 ```
 
-### 3. Installation
+2. Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+npm install
 ```
 
-### 4. Running the Server
-
-To run the server with a remote SSE transport (useful for remote connectors):
+3. Run in development:
 
 ```bash
-python main.py
+npm run dev
 ```
 
-The server will start on `http://localhost:3000`.
+The app listens on `http://localhost:3000`.
 
-### 5. Connecting to Grok/Claude/Cursor
+## Production build
 
-Use the SSE transport URL: `http://localhost:3000/mcp/sse`
-
-#### Example (Claude Desktop Config)
-
-```json
-{
-  "mcpServers": {
-    "steam": {
-      "command": "python",
-      "args": ["main.py"],
-      "env": {
-        "STEAM_USER_ID": "your_id"
-      }
-    }
-  }
-}
+```bash
+npm run build
+npm run preview
 ```
+
+## Troubleshooting
+
+- **Blank/no site**: Confirm you're opening `http://localhost:3000` (not another Vite default port).
+- **Command not found / Python errors**: You're using outdated Python instructions; use npm commands above.
+- **No Steam data**: Ensure Steam profile and game details are public, and `STEAM_USER_ID` is set.
 
 ## License
+
 MIT
