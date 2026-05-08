@@ -17,7 +17,6 @@ const __dirname = path.dirname(__filename);
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
-  const PORT = 3000;
   const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
   app.use(cors());
@@ -48,17 +47,6 @@ async function startServer() {
     });
   });
 
-  app.get('/.well-known/oauth-authorization-server', (_req, res) => {
-    res.json({
-      issuer: APP_URL,
-      authorization_endpoint: `${APP_URL}/oauth/authorize`,
-      token_endpoint: `${APP_URL}/oauth/token`,
-      response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
-      scopes_supported: ['read']
-    });
-  });
 
   // --- OAuth Logic (Mocked to bypass Grok/Claude requirements) ---
   app.get('/oauth/authorize', (req, res) => {
