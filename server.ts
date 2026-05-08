@@ -48,18 +48,46 @@ async function startServer() {
       code_challenge_methods_supported: ['S256', 'plain']
     });
   });
+  app.get('/.well-known/openid-configuration', (req, res) => {
+    const host = req.get('x-forwarded-host') || req.get('host');
+    const proto = req.get('x-forwarded-proto') || req.protocol;
+    const requestBaseUrl = host ? `${proto}://${host}` : APP_URL;
+    const issuer = process.env.APP_URL || requestBaseUrl;
+
+    res.json({
+      issuer,
+      authorization_endpoint: `${issuer}/oauth/authorize`,
+      token_endpoint: `${issuer}/oauth/token`,
+      response_types_supported: ['code', 'token'],
+      grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
+      token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
+      scopes_supported: ['read'],
+      code_challenge_methods_supported: ['S256', 'plain']
+    });
+  });
 
 
   // --- OAuth Logic (Mocked to bypass Grok/Claude requirements) ---
   app.get('/oauth/authorize', (req, res) => {
     const { redirect_uri, state, response_type, client_id, scope } = req.query;
     if (!redirect_uri) return res.status(400).json({ error: 'invalid_request', error_description: 'Missing redirect_uri' });
-    if (response_type && response_type !== 'code') {
-      return res.status(400).json({ error: 'unsupported_response_type', error_description: 'Only response_type=code is supported' });
+    if (response_type && response_type !== 'code' && response_type !== 'token') {
+      return res.status(400).json({ error: 'unsupported_response_type', error_description: 'Only response_type=code or token is supported' });
     }
     
     try {
       const url = new URL(redirect_uri as string);
+      if (response_type === 'token') {
+        url.hash = new URLSearchParams({
+          access_token: `mock_access_${crypto.randomUUID().replace(/-/g, '')}`,
+          token_type: 'Bearer',
+          expires_in: '31536000',
+          scope: typeof scope === 'string' ? scope : 'read',
+          ...(state ? { state: String(state) } : {})
+        }).toString();
+        return res.redirect(url.toString());
+      }
+
       const authCode = `mock_${crypto.randomUUID().replace(/-/g, '')}`;
       authCodes.set(authCode, {
         redirectUri: redirect_uri as string,
