@@ -16,6 +16,7 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
+  const PORT = Number(process.env.PORT || 3000);
   const PORT = 3000;
   const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
@@ -25,6 +26,26 @@ async function startServer() {
 
   app.get('/favicon.ico', (_req, res) => {
     res.status(204).end();
+  });
+  app.get('/healthz', (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
+
+  app.get('/.well-known/oauth-authorization-server', (req, res) => {
+    const host = req.get('x-forwarded-host') || req.get('host');
+    const proto = req.get('x-forwarded-proto') || req.protocol;
+    const requestBaseUrl = host ? `${proto}://${host}` : APP_URL;
+    const issuer = process.env.APP_URL || requestBaseUrl;
+
+    res.json({
+      issuer,
+      authorization_endpoint: `${issuer}/oauth/authorize`,
+      token_endpoint: `${issuer}/oauth/token`,
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+      token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
+      scopes_supported: ['read']
+    });
   });
 
   app.get('/.well-known/oauth-authorization-server', (_req, res) => {
