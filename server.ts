@@ -16,7 +16,8 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
+  const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
   app.use(cors());
   app.use(express.json());
@@ -24,6 +25,26 @@ async function startServer() {
 
   app.get('/favicon.ico', (_req, res) => {
     res.status(204).end();
+  });
+  app.get('/healthz', (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
+
+  app.get('/.well-known/oauth-authorization-server', (req, res) => {
+    const host = req.get('x-forwarded-host') || req.get('host');
+    const proto = req.get('x-forwarded-proto') || req.protocol;
+    const requestBaseUrl = host ? `${proto}://${host}` : APP_URL;
+    const issuer = process.env.APP_URL || requestBaseUrl;
+
+    res.json({
+      issuer,
+      authorization_endpoint: `${issuer}/oauth/authorize`,
+      token_endpoint: `${issuer}/oauth/token`,
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+      token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
+      scopes_supported: ['read']
+    });
   });
 
   // --- OAuth Logic (Mocked to bypass Grok/Claude requirements) ---
@@ -46,16 +67,39 @@ async function startServer() {
     }
   });
 
-  app.post('/oauth/token', (req, res) => {
+  app.all('/oauth/token', (req, res) => {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'invalid_request', error_description: 'Use POST for token exchange' });
+    }
+
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Pragma', 'no-cache');
-    // Return a mock token
+    const authHeader = req.headers.authorization;
+    if (authHeader?.toLowerCase().startsWith('basic ')) {
+      // Decode without validating because this is a mocked OAuth bridge for MCP clients.
+      try {
+        Buffer.from(authHeader.slice(6), 'base64').toString('utf8');
+      } catch (_e) {
+        return res.status(400).json({ error: 'invalid_client', error_description: 'Malformed Authorization header' });
+      }
+    }
+
     const grantType = req.body?.grant_type;
+    const code = req.body?.code;
     if (grantType && grantType !== 'authorization_code' && grantType !== 'refresh_token') {
       return res.status(400).json({
         error: 'unsupported_grant_type',
         error_description: 'Supported grant types are authorization_code and refresh_token'
       });
+    }
+    if (!grantType) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Missing grant_type' });
+    }
+    if (grantType === 'authorization_code' && !code) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Missing authorization code' });
+    }
+    if (grantType === 'authorization_code' && code !== 'mock_auth_code_123') {
+      return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid or expired authorization code' });
     }
 
     res.json({
