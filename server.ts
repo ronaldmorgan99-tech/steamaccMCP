@@ -5,20 +5,33 @@ import { fileURLToPath } from 'url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
-import axios from 'axios';
 import cors from 'cors';
-import * as dotenv from 'dotenv';
 import crypto from 'crypto';
-
-dotenv.config();
+import { getAppUrl, getPort, getSteamUserId, normalizeSteamId } from './src/config';
+import { SteamClient } from './src/steam-client';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const authCodes = new Map<string, { redirectUri: string; clientId?: string; scope?: string; expiresAt: number }>();
+
+function resolveSteamId(steamIdOverride?: string): string | null {
+  const candidate = steamIdOverride?.trim() || process.env.STEAM_USER_ID?.trim();
+  if (!candidate) {
+    return null;
+  }
+
+  const normalized = normalizeSteamId(candidate);
+  if (normalized) {
+    return normalized;
+  }
+
+  return null;
+}
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT || 3000);
-  const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+  const PORT = getPort();
+  const APP_URL = getAppUrl();
 
   app.use(cors());
   app.use(express.json());
@@ -27,8 +40,9 @@ async function startServer() {
   app.get('/favicon.ico', (_req, res) => {
     res.status(204).end();
   });
+
   app.get('/healthz', (_req, res) => {
-    res.status(200).json({ ok: true });
+    res.status(200).json({ ok: true, appUrl: APP_URL, port: PORT });
   });
 
   app.get('/.well-known/oauth-authorization-server', (req, res) => {
@@ -48,6 +62,7 @@ async function startServer() {
       code_challenge_methods_supported: ['S256', 'plain']
     });
   });
+
   app.get('/.well-known/openid-configuration', (req, res) => {
     const host = req.get('x-forwarded-host') || req.get('host');
     const proto = req.get('x-forwarded-proto') || req.protocol;
@@ -66,17 +81,17 @@ async function startServer() {
     });
   });
 
-
-  // --- OAuth Logic (Mocked to bypass Grok/Claude requirements) ---
   app.get('/oauth/authorize', (req, res) => {
     const { redirect_uri, state, response_type, client_id, scope } = req.query;
-    if (!redirect_uri) return res.status(400).json({ error: 'invalid_request', error_description: 'Missing redirect_uri' });
+    if (!redirect_uri) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Missing redirect_uri' });
+    }
     if (response_type && response_type !== 'code' && response_type !== 'token') {
       return res.status(400).json({ error: 'unsupported_response_type', error_description: 'Only response_type=code or token is supported' });
     }
-    
+
     try {
-      const url = new URL(redirect_uri as string);
+      const url = new URL(String(redirect_uri));
       if (response_type === 'token') {
         url.hash = new URLSearchParams({
           access_token: `mock_access_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -90,17 +105,17 @@ async function startServer() {
 
       const authCode = `mock_${crypto.randomUUID().replace(/-/g, '')}`;
       authCodes.set(authCode, {
-        redirectUri: redirect_uri as string,
+        redirectUri: String(redirect_uri),
         clientId: typeof client_id === 'string' ? client_id : undefined,
         scope: typeof scope === 'string' ? scope : 'read',
         expiresAt: Date.now() + 5 * 60 * 1000
       });
       url.searchParams.append('code', authCode);
       if (state) {
-        url.searchParams.append('state', state as string);
+        url.searchParams.append('state', String(state));
       }
-      res.redirect(url.toString());
-    } catch (e) {
+      return res.redirect(url.toString());
+    } catch (_error) {
       return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri format' });
     }
   });
@@ -112,12 +127,12 @@ async function startServer() {
 
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Pragma', 'no-cache');
+
     const authHeader = req.headers.authorization;
     if (authHeader?.toLowerCase().startsWith('basic ')) {
-      // Decode without validating because this is a mocked OAuth bridge for MCP clients.
       try {
         Buffer.from(authHeader.slice(6), 'base64').toString('utf8');
-      } catch (_e) {
+      } catch (_error) {
         return res.status(400).json({ error: 'invalid_client', error_description: 'Malformed Authorization header' });
       }
     }
@@ -126,6 +141,7 @@ async function startServer() {
     const code = req.body?.code;
     const redirectUri = req.body?.redirect_uri;
     const clientId = req.body?.client_id;
+
     if (grantType && grantType !== 'authorization_code' && grantType !== 'refresh_token') {
       return res.status(400).json({
         error: 'unsupported_grant_type',
@@ -153,7 +169,7 @@ async function startServer() {
       authCodes.delete(code);
     }
 
-    res.json({
+    return res.json({
       access_token: `mock_access_${crypto.randomUUID().replace(/-/g, '')}`,
       token_type: 'Bearer',
       expires_in: 31536000,
@@ -162,121 +178,91 @@ async function startServer() {
     });
   });
 
-  // --- Steam Logic (Public Profile Mode) ---
-  class SteamClient {
-    private steamId: string;
-    private PUBLIC_BASE_URL = "https://steamcommunity.com/profiles";
-
-    constructor(steamId: string) {
-      this.steamId = steamId;
-    }
-
-    async getPlayerSummary() {
-      const url = `${this.PUBLIC_BASE_URL}/${this.steamId}/?xml=1`;
-      try {
-        const response = await axios.get(url);
-        const xml = response.data;
-        const steamID = xml.match(/<steamID><!\[CDATA\[(.*?)\]\]><\/steamID>/)?.[1] || xml.match(/<steamID>(.*?)<\/steamID>/)?.[1];
-        const onlineState = xml.match(/<onlineState>(.*?)<\/onlineState>/)?.[1];
-        const avatarFull = xml.match(/<avatarFull><!\[CDATA\[(.*?)\]\]><\/avatarFull>/)?.[1] || xml.match(/<avatarFull>(.*?)<\/avatarFull>/)?.[1];
-        const privacyState = xml.match(/<privacyState>(.*?)<\/privacyState>/)?.[1];
-        
-        return {
-          personaname: steamID,
-          personastate: onlineState,
-          avatar: avatarFull,
-          is_private: privacyState !== 'public'
-        };
-      } catch (e) {
-        return null;
-      }
-    }
-
-    async getOwnedGames() {
-      const url = `${this.PUBLIC_BASE_URL}/${this.steamId}/games/?tab=all&xml=1`;
-      try {
-        const response = await axios.get(url);
-        const xml = response.data;
-        const games: any[] = [];
-        const gameMatches = xml.matchAll(/<game>([\s\S]*?)<\/game>/g);
-        
-        for (const match of gameMatches) {
-          const content = match[1];
-          const appid = content.match(/<appID>(.*?)<\/appID>/)?.[1];
-          const name = content.match(/<name><!\[CDATA\[(.*?)\]\]><\/name>/)?.[1] || content.match(/<name>(.*?)<\/name>/)?.[1];
-          const hoursOnRecord = content.match(/<hoursOnRecord>(.*?)<\/hoursOnRecord>/)?.[1];
-          const hoursLast2Weeks = content.match(/<hoursLast2Weeks>(.*?)<\/hoursLast2Weeks>/)?.[1];
-          
-          if (appid && name) {
-            games.push({
-              appid: parseInt(appid),
-              name,
-              playtime_forever: parseFloat((hoursOnRecord || '0').replace(',', '')) * 60,
-              playtime_2weeks: parseFloat((hoursLast2Weeks || '0').replace(',', '')) * 60
-            });
-          }
-        }
-        return games;
-      } catch (e) {
-        return [];
-      }
-    }
-  }
-
-  // --- MCP Server Setup ---
   const mcpServer = new McpServer({
-    name: "Steam MCP Server",
-    version: "1.0.0",
+    name: 'Steam MCP Server',
+    version: '1.0.0'
   });
 
-  mcpServer.tool("get_player_summary", { steam_id: z.string().optional() }, async ({ steam_id }) => {
-    const id = steam_id || process.env.STEAM_USER_ID;
-    if (!id) return { content: [{ type: "text", text: "No Steam ID provided." }] };
-    const client = new SteamClient(id);
+  mcpServer.tool('get_player_summary', { steam_id: z.string().optional() }, async ({ steam_id }) => {
+    const steamId = resolveSteamId(steam_id) ?? (() => {
+      try {
+        return getSteamUserId();
+      } catch (_error) {
+        return null;
+      }
+    })();
+
+    if (!steamId) {
+      return { content: [{ type: 'text', text: 'No valid Steam ID provided. Set STEAM_USER_ID to a valid 17-digit Steam64 ID.' }] };
+    }
+
+    const client = new SteamClient(steamId);
     const summary = await client.getPlayerSummary();
-    if (!summary) return { content: [{ type: "text", text: "Profile not found." }] };
+    if (!summary) {
+      return { content: [{ type: 'text', text: 'Profile not found or the Steam profile is unavailable.' }] };
+    }
+
     return {
-      content: [{ type: "text", text: `Player: ${summary.personaname}\nStatus: ${summary.personastate}\nPrivate: ${summary.is_private}` }]
+      content: [{
+        type: 'text',
+        text: `Player: ${summary.personaname ?? 'unknown'}\nStatus: ${summary.personastate ?? 'unknown'}\nPrivate: ${summary.is_private}`
+      }]
     };
   });
 
-  mcpServer.tool("get_library", { steam_id: z.string().optional() }, async ({ steam_id }) => {
-    const id = steam_id || process.env.STEAM_USER_ID;
-    if (!id) return { content: [{ type: "text", text: "No Steam ID provided." }] };
-    const client = new SteamClient(id);
+  mcpServer.tool('get_library', { steam_id: z.string().optional() }, async ({ steam_id }) => {
+    const steamId = resolveSteamId(steam_id) ?? (() => {
+      try {
+        return getSteamUserId();
+      } catch (_error) {
+        return null;
+      }
+    })();
+
+    if (!steamId) {
+      return { content: [{ type: 'text', text: 'No valid Steam ID provided. Set STEAM_USER_ID to a valid 17-digit Steam64 ID.' }] };
+    }
+
+    const client = new SteamClient(steamId);
     const games = await client.getOwnedGames();
-    if (games.length === 0) return { content: [{ type: "text", text: "No games found or profile is private." }] };
-    const list = games.slice(0, 20).map(g => `- ${g.name} (${Math.round(g.playtime_forever / 60)}h)`).join('\n');
+    if (games.length === 0) {
+      return { content: [{ type: 'text', text: 'No games found or the profile is private.' }] };
+    }
+
+    const list = games.slice(0, 20).map((game) => `- ${game.name} (${Math.round(game.playtime_forever / 60)}h)`).join('\n');
     return {
-      content: [{ type: "text", text: `Top Games:\n${list}${games.length > 20 ? '\n... and ' + (games.length - 20) + ' more' : ''}` }]
+      content: [{
+        type: 'text',
+        text: `Top Games:\n${list}${games.length > 20 ? `\n... and ${games.length - 20} more` : ''}`
+      }]
     };
   });
 
   let transport: SSEServerTransport | null = null;
-  app.get("/mcp/sse", async (req, res) => {
-    transport = new SSEServerTransport("/mcp/messages", res);
+
+  app.get('/mcp/sse', async (_req, res) => {
+    transport = new SSEServerTransport('/mcp/messages', res);
     await mcpServer.connect(transport);
   });
 
-  app.post("/mcp/messages", async (req, res) => {
+  app.post('/mcp/messages', async (req, res) => {
     if (transport) {
       await transport.handlePostMessage(req, res);
     } else {
-      res.status(400).send("No active transport");
+      res.status(400).send('No active transport');
     }
   });
 
-  // --- Vite Middleware ---
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true, hmr: false },
-      appType: 'spa',
+      appType: 'spa'
     });
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
@@ -286,5 +272,7 @@ async function startServer() {
   });
 }
 
-startServer().catch(console.error);
-  const authCodes = new Map<string, { redirectUri: string; clientId?: string; scope?: string; expiresAt: number }>();
+startServer().catch((error) => {
+  console.error('Failed to start Steam MCP server:', error);
+  process.exit(1);
+});
