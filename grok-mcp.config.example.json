@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "steam": {
+      "command": "npx",
+      "args": ["tsx", "server.ts"],
+      "env": {
+        "STEAM_USER_ID": "YOUR_STEAM64_ID",
+        "PORT": "3000",
+        "APP_URL": "http://localhost:3000"
+      }
+    }
+  }
+}
